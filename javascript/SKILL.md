@@ -116,7 +116,7 @@ export interface RunResult {
 **Key conventions:**
 
 - `id` is a kebab-case slug — used as the route param and Vue `:key`
-- `expectedOutput` contains `null` when no auto-check is possible (e.g. timing-dependent problems)
+- `expectedOutput` is `[]` when no auto-check is possible (e.g. async or timing-dependent problems)
 - `RunResult.passed` is `null` when no expected output is defined — show a neutral result badge
 
 ## Problem Definitions
@@ -138,7 +138,7 @@ export const problems: JsProblem[] = [
     starterCode: `for (var i = 0; i < 3; i++) {
   setTimeout(() => console.log(i), 0);
 }`,
-    expectedOutput: ["3", "3", "3"],
+    expectedOutput: [],
     explanation:
       "`var` is function-scoped, so all three callbacks share the same `i`. By the time the event loop fires them, the loop has finished and `i` is 3. Fix with `let` (block-scoped) or an IIFE that captures `i` per iteration.",
     solutionCode: `// Fix 1 — let (block-scoped, new binding per iteration)
@@ -178,7 +178,13 @@ console.log(counter.value()); // 1`,
     decrement() { count--; },
     value() { return count; },
   };
-}`,
+}
+
+const counter = makeCounter();
+counter.increment();
+counter.increment();
+counter.decrement();
+console.log(counter.value()); // 1`,
     tags: ["closure", "encapsulation", "factory function"],
   },
 
@@ -199,23 +205,19 @@ console.log(counter.value()); // 1`,
   },
 };
 user.greet();`,
-    expectedOutput: ["Hello, undefined"],
+    expectedOutput: [],
     explanation:
       "A regular function passed as a callback loses its original `this` — it defaults to `undefined` in strict mode or the global object. Arrow functions capture `this` lexically from their enclosing scope, solving the problem.",
-    solutionCode: `// Fix 1 — bind
-greet: function () {
-  setTimeout(function () {
-    console.log("Hello,", this.name);
-  }.bind(this), 0);
-}
-
-// Fix 2 — arrow function callback
-greet: function () {
-  setTimeout(() => console.log("Hello,", this.name), 0);
-}
-
-// Fix 3 — arrow method (arrow captures this from class/object literal context)
-greet: () => { /* note: arrow methods don't have own this in object literals */ }`,
+    solutionCode: `const user = {
+  name: "Alice",
+  // Fix: arrow function captures lexical this
+  greet: function () {
+    setTimeout(() => {
+      console.log("Hello,", this.name); // "Hello, Alice"
+    }, 0);
+  },
+};
+user.greet();`,
     tags: ["this", "bind", "arrow function", "callback"],
   },
   {
@@ -236,10 +238,20 @@ console.log(dog instanceof Animal); // ?`,
     expectedOutput: ["true", "false", "true"],
     explanation:
       "`hasOwnProperty` returns true only for properties set directly on the instance. `toString` lives on `Object.prototype`, not on `dog` itself — it's found via the prototype chain. Methods added to `Constructor.prototype` are shared across all instances without copying.",
-    solutionCode: `Animal.prototype.speak = function () {
-  console.log(\`\${this.name} says hi\`);
+    solutionCode: `function Animal(name) {
+  this.name = name;
+}
+
+const dog = new Animal("Rex");
+console.log(dog.hasOwnProperty("name"));
+console.log(dog.hasOwnProperty("toString"));
+console.log(dog instanceof Animal);
+
+// Bonus: shared method via prototype
+Animal.prototype.speak = function () {
+  console.log(this.name + " says hi");
 };
-dog.speak(); // Rex says hi`,
+// dog.speak(); // Rex says hi`,
     tags: ["prototype", "new", "instanceof", "hasOwnProperty"],
   },
 
@@ -257,9 +269,18 @@ Promise.resolve()
   .then(() => console.log("C"));
 
 console.log("D");`,
-    expectedOutput: ["A", "D", "B", "C"],
+    expectedOutput: [],
     explanation:
       "Synchronous code runs first (A, D). Promise `.then` callbacks are microtasks — they run after the current synchronous task completes but before any macrotasks (like setTimeout). Each `.then` schedules the next one, so B then C.",
+    solutionCode: `console.log("A"); // 1st — synchronous
+
+Promise.resolve()
+  .then(() => console.log("B")) // 3rd — microtask, runs after sync
+  .then(() => console.log("C")); // 4th — microtask, runs after B
+
+console.log("D"); // 2nd — synchronous
+
+// Output order: A → D → B → C`,
     tags: ["promise", "microtask", "event loop", "then"],
   },
   {
@@ -279,10 +300,16 @@ console.log("D");`,
 fetchUser(-1)
   .then((user) => console.log(user.name))
   .catch((err) => console.log("Error:", err.message));`,
-    expectedOutput: ["Error: Invalid ID"],
+    expectedOutput: [],
     explanation:
       "`await` unwraps a resolved Promise. For rejected Promises, wrap `await` in a `try/catch`. This gives synchronous-looking control flow while remaining non-blocking.",
-    solutionCode: `async function run() {
+    solutionCode: `function fetchUser(id) {
+  return id > 0
+    ? Promise.resolve({ id, name: "Alice" })
+    : Promise.reject(new Error("Invalid ID"));
+}
+
+async function run() {
   try {
     const user = await fetchUser(-1);
     console.log(user.name);
@@ -305,9 +332,15 @@ run();`,
 Promise.resolve().then(() => console.log("promise"));
 queueMicrotask(() => console.log("microtask"));
 console.log("sync");`,
-    expectedOutput: ["sync", "promise", "microtask", "timeout"],
+    expectedOutput: [],
     explanation:
       "Synchronous code runs first. After the call stack empties, the microtask queue drains completely (Promise callbacks, queueMicrotask) before any macrotask (setTimeout callback) is picked up. Promise `.then` and `queueMicrotask` are both microtasks and run in registration order.",
+    solutionCode: `setTimeout(() => console.log("timeout"), 0);    // macrotask — fires last
+Promise.resolve().then(() => console.log("promise")); // microtask — 2nd
+queueMicrotask(() => console.log("microtask"));        // microtask — 3rd
+console.log("sync");                                   // synchronous — 1st
+
+// Output order: sync → promise → microtask → timeout`,
     tags: ["event loop", "microtask", "macrotask", "setTimeout", "promise"],
   },
 
@@ -328,7 +361,11 @@ console.log(host);    // localhost
 console.log(port);    // 8080
 console.log(isHttps); // true`,
     expectedOutput: ["localhost", "8080", "true"],
-    solutionCode: `const { host = "localhost", port = 3000, secure: isHttps = false } = config;`,
+    solutionCode: `const config = { port: 8080, secure: true };
+const { host = "localhost", port = 3000, secure: isHttps = false } = config;
+console.log(host);
+console.log(port);
+console.log(isHttps);`,
     explanation:
       "Destructuring syntax: `{ key: newName = defaultValue }`. Defaults only apply when the value is `undefined`. The rename and default can be combined in one declaration.",
     tags: ["destructuring", "default values", "rename", "object"],
@@ -356,6 +393,10 @@ for (const n of range(0, 10, 2)) {
   for (let i = start; i < end; i += step) {
     yield i;
   }
+}
+
+for (const n of range(0, 10, 2)) {
+  console.log(n);
 }`,
     tags: ["generator", "yield", "iterator", "for...of", "lazy evaluation"],
   },
@@ -381,10 +422,18 @@ console.log(total); // 72`,
     expectedOutput: ["72"],
     explanation:
       "Chain: filter out out-of-stock items → map to discounted prices → reduce to sum. Each step is a pure transformation — no mutation, no side effects. Reading it top-to-bottom describes what the code does, not how.",
-    solutionCode: `const total = inventory
+    solutionCode: `const inventory = [
+  { name: "Widget", price: 25, inStock: true },
+  { name: "Gadget", price: 80, inStock: false },
+  { name: "Doohickey", price: 40, inStock: true },
+  { name: "Thingamajig", price: 15, inStock: true },
+];
+
+const total = inventory
   .filter((item) => item.inStock)
   .map((item) => item.price * 0.9)
-  .reduce((sum, price) => sum + price, 0);`,
+  .reduce((sum, price) => sum + price, 0);
+console.log(total);`,
     tags: [
       "map",
       "filter",
@@ -527,7 +576,7 @@ defineProps<{ lines: OutputLine[]; errorMessage?: string | null }>();
 
 ### Async Problem Handling
 
-Problems in `async-promises` and `event-loop` categories run natively — `setTimeout`, `Promise`, and `queueMicrotask` are real browser APIs available inside `new Function`. Set `expectedOutput: []` for problems where output order is the learning goal; show the actual output and let the explanation guide the user.
+Problems in `async-promises` and `event-loop` categories run natively — `setTimeout`, `Promise`, and `queueMicrotask` are real browser APIs available inside `new Function`. **All async problems must set `expectedOutput: []`** — the synchronous `passed` check runs before callbacks fire and cannot capture async output. The output console will still display async output once callbacks fire (Vue tracks array mutations reactively), and the explanation panel guides the user through the expected order.
 
 ### Difficulty Badges
 
@@ -550,4 +599,5 @@ Problems in `async-promises` and `event-loop` categories run natively — `setTi
 2. Set `category` to an existing `ConceptCategory` (or extend the union type)
 3. Provide `starterCode` that demonstrates the gotcha, not the solution
 4. Write `explanation` in plain language — first state _what_ happens, then _why_, then the fix
-5. `expectedOutput` lines must be exact string matches to what `console.log` produces
+5. `expectedOutput` lines must be exact string matches to what `console.log` produces synchronously; use `[]` for async problems
+6. `solutionCode` must be a **complete, self-contained runnable program** — include all variable declarations, helper functions, and `console.log` calls needed to produce `expectedOutput`. Never write partial snippets that reference undefined variables or functions.

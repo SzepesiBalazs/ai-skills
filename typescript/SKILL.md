@@ -60,14 +60,16 @@ The app has two top-level modes toggled in the sidebar: **Concept Problems** and
 │  └──────────────────────┘  │  ┌──────────────────┐ ┌───────────────┐  │ │
 │                             │  │ ErrorScenarioList│ │ ErrorWorkspace│  │ │
 │                             │  │                  │ │               │  │ │
-│                             │  │ TS2322 Mismatch  │ │ BrokenCode    │  │ │
-│                             │  │ TS2345 Argument  │ │ ───────────── │  │ │
-│                             │  │ TS2339 No prop   │ │ DiagnosticList│  │ │
-│                             │  │ TS7006 Implicit  │ │ ───────────── │  │ │
-│                             │  │  any             │ │ FixGuide      │  │ │
-│                             │  │ TS2366 Missing   │ │               │  │ │
-│                             │  │  return          │ └───────────────┘  │ │
-│                             │  └──────────────────┘                    │ │
+│                             │  │ TS2322 Mismatch  │ │ CodeEditor    │  │ │
+│                             │  │ TS2345 Argument  │ │ (editable)    │  │ │
+│                             │  │ TS2339 No prop   │ │ ──────────── │  │ │
+│                             │  │ TS7006 Implicit  │ │ [▶ Check Fix] │  │ │
+│                             │  │  any             │ │ [Reset]       │  │ │
+│                             │  │ TS2366 Missing   │ │ [Reveal]      │  │ │
+│                             │  │  return          │ │ ──────────── │  │ │
+│                             │  │                  │ │ CheckResult  │  │ │
+│                             │  │                  │ │ DiagList     │  │ │
+│                             │  └──────────────────┘ └───────────────┘  │ │
 │                             └───────────────────────────────────────────┘ │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
@@ -86,7 +88,7 @@ Nine pieces total:
 **Type Error Playground mode (3):**
 
 7. **TypeErrorPlayground** — top-level wrapper; owns the selected scenario
-8. **ErrorWorkspace** — shows `BrokenCodeEditor` (read-only with syntax highlighting), `DiagnosticList` (error messages as the compiler would emit them), and `FixGuide`
+8. **ErrorWorkspace** — shows `CodeEditor` (editable, pre-filled with `brokenCode`), `[▶ Check Fix]` / `[Reset]` / `[Reveal]` buttons, a live `DiagnosticList` updated by the checker after each check, a pass/fail badge, and the lesson + fixed code revealed on demand
 9. **ErrorScenarioList** — scrollable list of error scenarios grouped by TS error code
 
 ## Data Model
@@ -151,25 +153,33 @@ export interface ErrorScenario {
   /** Primary error code this scenario teaches */
   errorCode: number;
   title: string;
-  /** TypeScript code with intentional type errors */
+  /** Short challenge prompt shown above the editor — tells the user what to fix */
+  prompt: string;
+  /** TypeScript code with intentional type errors — pre-fills the editor */
   brokenCode: string;
-  /** Pre-computed diagnostics (mirrors what tsc would emit) */
+  /** Pre-computed diagnostics shown before the user makes any edits */
   diagnostics: TsDiagnostic[];
-  /** Corrected code that removes all type errors */
+  /** Corrected code shown on Reveal */
   fixedCode: string;
   /**
    * Plain-language explanation: what caused the error and the mental model
    * needed to understand and prevent it
    */
   lesson: string;
+
+  /**
+   * CheckResult — computed live by useErrorChecker after the user runs
+   * [▶ Check Fix]. Not part of scenario data — lives in composable state.
+   */
 }
 ```
 
 **Key conventions:**
 
 - `TsProblem.starterCode` contains valid TypeScript; runtime errors (not type errors) are the learning target in Concept Problems
-- `ErrorScenario.diagnostics` are stored as data — no live TS compiler runs in the browser; the playground is a curated teaching library, not a live LSP
-- `TsDiagnostic.line` drives CSS-based squiggly underline highlighting in `BrokenCodeEditor`
+- `ErrorScenario.diagnostics` are the initial diagnostics shown before any editing — they match what `tsc` would emit on `brokenCode`
+- After the user edits and clicks `[▶ Check Fix]`, `useErrorChecker` runs a real type-check and replaces the displayed diagnostics with live results
+- `TsDiagnostic.line` drives CSS-based squiggly underline highlighting in the editor
 
 ## Problem Definitions
 
@@ -229,7 +239,10 @@ formatValue(7);      // 70`,
   } else {
     console.log(value * 10);
   }
-}`,
+}
+
+formatValue("hi");
+formatValue(7);`,
     tags: ["typeof", "narrowing", "union", "type guard", "control flow"],
   },
 
@@ -254,7 +267,12 @@ console.log(b);`,
       "Generics let you write one function that works for any type while preserving type information. When you pass `42`, TypeScript infers `T = 42` (the literal). When you write `identity<string>('hi')`, you widen to `string`. The key insight: generics tie the return type to the input type without losing precision.",
     solutionCode: `function identity<T>(value: T): T {
   return value;
-}`,
+}
+
+const a = identity(42);
+const b = identity<string>("hi");
+console.log(a);
+console.log(b);`,
     tags: ["generics", "type inference", "explicit type parameter"],
   },
   {
@@ -302,7 +320,15 @@ console.log(user.name);`,
     expectedOutput: ["Bob"],
     explanation:
       "`T extends (...args: any[]) => infer R` checks whether `T` is a function type, and if so, captures its return type in the local variable `R` using `infer`. `infer` only works inside conditional types. This is exactly how `ReturnType<T>` is defined in TypeScript's lib. `never` is the fallback for non-function types.",
-    solutionCode: `type MyReturnType<T> = T extends (...args: any[]) => infer R ? R : never;`,
+    solutionCode: `type MyReturnType<T> = T extends (...args: any[]) => infer R ? R : never;
+
+function getUser() {
+  return { id: 1, name: "Alice" };
+}
+
+type User = MyReturnType<typeof getUser>;
+const user: User = { id: 2, name: "Bob" };
+console.log(user.name);`,
     tags: ["infer", "conditional types", "ReturnType", "advanced generics"],
   },
 
@@ -334,12 +360,23 @@ console.log(updated.port);`,
     expectedOutput: ["localhost", "8080"],
     explanation:
       "`Partial<T>` makes every property optional by mapping over all keys with `?`. This is the standard pattern for update/patch functions — the caller only provides what changed. `Required<T>` is the inverse: removes all `?` modifiers. Both are built-in mapped types in TypeScript's lib.",
-    solutionCode: `function updateSettings(
+    solutionCode: `interface AppSettings {
+  host: string;
+  port: number;
+  debug: boolean;
+}
+
+function updateSettings(
   current: AppSettings,
   patch: Partial<AppSettings>
 ): AppSettings {
   return { ...current, ...patch };
-}`,
+}
+
+const defaults: AppSettings = { host: "localhost", port: 3000, debug: false };
+const updated = updateSettings(defaults, { port: 8080, debug: true });
+console.log(updated.host);
+console.log(updated.port);`,
     tags: ["Partial", "Required", "utility types", "patch pattern"],
   },
   {
@@ -369,8 +406,21 @@ console.log(preview.id);`,
     expectedOutput: ["Alice", "1"],
     explanation:
       "`Pick<T, K>` keeps only the listed keys; `Omit<T, K>` keeps everything except them. Both construct new object types structurally — no runtime behaviour, compile-time only. Use `Omit` when you want to remove sensitive or internals-only fields before passing data across a boundary (e.g. to the UI layer).",
-    solutionCode: `type PublicUser = Omit<User, "passwordHash" | "email">;
-type UserPreview = Pick<User, "id" | "name">;`,
+    solutionCode: `interface User {
+  id: number;
+  name: string;
+  email: string;
+  passwordHash: string;
+}
+
+type PublicUser = Omit<User, "passwordHash" | "email">;
+type UserPreview = Pick<User, "id" | "name">;
+
+const user: User = { id: 1, name: "Alice", email: "a@b.com", passwordHash: "abc123" };
+const pub: PublicUser = { id: user.id, name: user.name };
+const preview: UserPreview = { id: user.id, name: user.name };
+console.log(pub.name);
+console.log(preview.id);`,
     tags: ["Pick", "Omit", "utility types", "structural typing"],
   },
   {
@@ -393,11 +443,15 @@ console.log(statusLabels[404]);`,
     expectedOutput: ["OK", "Not Found"],
     explanation:
       "`Record<K, V>` is a shorthand for `{ [P in K]: V }`. When `K` is a union (like `200 | 404 | 500`), TypeScript enforces that all three keys are present — missing one is a compile error. This makes `Record` a great pattern for exhaustive look-up tables.",
-    solutionCode: `const statusLabels: Record<HttpStatus, string> = {
+    solutionCode: `type HttpStatus = 200 | 404 | 500;
+
+const statusLabels: Record<HttpStatus, string> = {
   200: "OK",
   404: "Not Found",
   500: "Internal Server Error",
-};`,
+};
+console.log(statusLabels[200]);
+console.log(statusLabels[404]);`,
     tags: ["Record", "utility types", "mapped type", "exhaustive"],
   },
 
@@ -428,7 +482,18 @@ unwrap({ ok: false, error: "Not found" });`,
       "The `ok` field is the discriminant — a literal type that uniquely identifies each branch. When TypeScript sees `result.ok === true`, it narrows the union to only the first branch, making `result.value` available without a cast. This pattern is safer than throwing exceptions for expected failures.",
     solutionCode: `type Result<T> =
   | { ok: true; value: T }
-  | { ok: false; error: string };`,
+  | { ok: false; error: string };
+
+function unwrap<T>(result: Result<T>): void {
+  if (result.ok) {
+    console.log("Value:", result.value);
+  } else {
+    console.log("Error:", result.error);
+  }
+}
+
+unwrap({ ok: true, value: 42 });
+unwrap({ ok: false, error: "Not found" });`,
     tags: [
       "discriminated union",
       "narrowing",
@@ -477,7 +542,10 @@ function describe(s: Status): void {
       throw new Error("Unhandled status: " + _exhaustive);
     }
   }
-}`,
+}
+
+describe("active");
+describe("inactive");`,
     tags: ["never", "exhaustive", "switch", "discriminated union"],
   },
 
@@ -511,7 +579,20 @@ console.log(cfg.debug);`,
       "Mapped types iterate over `keyof T` using `[K in keyof T]`. The `readonly` modifier is added to each key. The conditional `T[K] extends object ? DeepReadonly<T[K]> : T[K]` recurses into nested objects. Functions and primitive values pass through unchanged. This pattern is the foundation of many Vue and Redux immutability utilities.",
     solutionCode: `type DeepReadonly<T> = {
   readonly [K in keyof T]: T[K] extends object ? DeepReadonly<T[K]> : T[K];
-};`,
+};
+
+interface Config {
+  server: { host: string; port: number };
+  debug: boolean;
+}
+
+const cfg: DeepReadonly<Config> = {
+  server: { host: "localhost", port: 3000 },
+  debug: false,
+};
+
+console.log(cfg.server.host);
+console.log(cfg.debug);`,
     tags: ["mapped types", "readonly", "recursive", "immutability"],
   },
   {
@@ -540,9 +621,20 @@ handlers.onFocus();`,
     expectedOutput: ["clicked", "focused"],
     explanation:
       "Template literal types combine string literal unions with string manipulation intrinsics (`Capitalize`, `Uppercase`, `Lowercase`, `Uncapitalize`). `[K in EventName as \`on\${Capitalize<K>}\`]` remaps the key name during the mapped type iteration — a feature called 'key remapping'. This is the pattern Vue and many event emitters use to derive typed handler names at compile time.",
-    solutionCode: `type EventMap = {
+    solutionCode: `type EventName = "click" | "focus" | "blur";
+
+type EventMap = {
   [K in EventName as \`on\${Capitalize<K>}\`]: () => void;
-};`,
+};
+
+const handlers: EventMap = {
+  onClick: () => console.log("clicked"),
+  onFocus: () => console.log("focused"),
+  onBlur:  () => console.log("blurred"),
+};
+
+handlers.onClick();
+handlers.onFocus();`,
     tags: [
       "template literal types",
       "Capitalize",
@@ -578,7 +670,18 @@ handle("hello");`,
       "A function returning `value is SomeType` is a type predicate. When TypeScript sees the call in an `if` condition, it narrows the argument to `SomeType` inside the true branch. This is more powerful than inline `typeof`/`instanceof` checks because it centralises the guard logic and works with complex, multi-property checks.",
     solutionCode: `function isError(value: unknown): value is Error {
   return value instanceof Error;
-}`,
+}
+
+function handle(value: unknown): void {
+  if (isError(value)) {
+    console.log("Error:", value.message);
+  } else {
+    console.log("Value:", String(value));
+  }
+}
+
+handle(new Error("oops"));
+handle("hello");`,
     tags: ["type predicate", "is", "instanceof", "unknown", "narrowing"],
   },
   {
@@ -602,11 +705,16 @@ console.log(palette.green.join(", "));`,
     expectedOutput: ["#FF0000", "#00ff00, #33ff33"],
     explanation:
       "`satisfies` (TS 4.9+) validates that an expression matches a type without widening the inferred type of the variable. If you used `: Palette` instead, `palette.red` would be `string | string[]` and `.toUpperCase()` would be a type error. With `satisfies`, the constraint is checked but the narrow type (`string` for `red`, `string[]` for `green`) is preserved.",
-    solutionCode: `const palette = {
+    solutionCode: `type Palette = Record<string, string | string[]>;
+
+const palette = {
   red:   "#ff0000",
   green: ["#00ff00", "#33ff33"],
   blue:  "#0000ff",
-} satisfies Palette;`,
+} satisfies Palette;
+
+console.log(palette.red.toUpperCase());
+console.log(palette.green.join(", "));`,
     tags: ["satisfies", "type widening", "inference", "TS 4.9"],
   },
 ];
@@ -625,6 +733,8 @@ export const errorScenarios: ErrorScenario[] = [
     id: "ts2322-basic",
     errorCode: 2322,
     title: "Assigning a string to a number",
+    prompt:
+      "Fix the type error: assign a value of the correct type to `count`.",
     brokenCode: `let count: number = 0;
 count = "five"; // TS2322`,
     diagnostics: [
@@ -643,6 +753,7 @@ count = 5; // OK — a real number`,
     id: "ts2322-object-shape",
     errorCode: 2322,
     title: "Object missing a required property",
+    prompt: "Fix the type error: make `p` satisfy the `Point` interface.",
     brokenCode: `interface Point {
   x: number;
   y: number;
@@ -667,6 +778,7 @@ const p: Point = { x: 10 }; // TS2322 — y is missing`,
     id: "ts2345-argument",
     errorCode: 2345,
     title: "Passing the wrong type to a function",
+    prompt: "Fix the type error: call `double` with the correct argument type.",
     brokenCode: `function double(n: number): number {
   return n * 2;
 }
@@ -691,6 +803,8 @@ const result = double("4"); // TS2345`,
     id: "ts2339-no-property",
     errorCode: 2339,
     title: "Accessing a property that doesn't exist on the type",
+    prompt:
+      "Fix the type error: make `year` accessible on `car` without using `any`.",
     brokenCode: `interface Car {
   make: string;
   model: string;
@@ -718,6 +832,8 @@ console.log(car.year); // OK (possibly undefined)`,
     id: "ts2339-union-access",
     errorCode: 2339,
     title: "Accessing a property only present on one union member",
+    prompt:
+      "Fix the type error: access `radius` safely by narrowing the union before using it.",
     brokenCode: `type Shape =
   | { kind: "circle"; radius: number }
   | { kind: "rect"; width: number; height: number };
@@ -748,6 +864,8 @@ function area(s: Shape): number {
     id: "ts7006-implicit-any",
     errorCode: 7006,
     title: "Parameter implicitly has an 'any' type",
+    prompt:
+      "Fix the type error: give every parameter an explicit type annotation.",
     brokenCode: `// tsconfig: "noImplicitAny": true
 
 function greet(name) { // TS7006
@@ -772,6 +890,8 @@ function greet(name) { // TS7006
     id: "ts2366-missing-return",
     errorCode: 2366,
     title: "Function lacks ending return statement",
+    prompt:
+      "Fix the type error: ensure every code path in `divide` returns a `number` (or change the return type).",
     brokenCode: `function divide(a: number, b: number): number {
   if (b !== 0) {
     return a / b;
@@ -802,6 +922,8 @@ function greet(name) { // TS7006
     id: "ts2769-overload-mismatch",
     errorCode: 2769,
     title: "No overload matches this call",
+    prompt:
+      "Fix the type error: call `Array.from` with an argument that matches one of its overload signatures.",
     brokenCode: `// Array.from is overloaded — one form takes an iterable,
 // another takes { length } + mapFn
 
@@ -915,6 +1037,133 @@ export function useTsRunner(problem: TsProblem) {
 
 **Security note:** `new Function(jsCode)` has no access to the module's scope. The TypeScript source is transpiled server-side only in this sandbox — no user input is ever injected into the transpile call or the code string.
 
+## useErrorChecker Composable
+
+Install the virtual filesystem package first:
+
+```bash
+npm install @typescript/vfs
+```
+
+Create `src/composables/useErrorChecker.ts`:
+
+```ts
+import { ref, watch } from "vue";
+import ts from "typescript";
+import * as tsvfs from "@typescript/vfs";
+import type { TsDiagnostic, ErrorScenario } from "@/types/ts-explorer";
+
+// Singleton lib map — loaded once from CDN on first check, then reused
+let libMapPromise: Promise<Map<string, string>> | null = null;
+
+function getLibMap(): Promise<Map<string, string>> {
+  if (!libMapPromise) {
+    libMapPromise = tsvfs.createDefaultMapFromCDN(
+      { target: ts.ScriptTarget.ES2020 },
+      ts.version,
+      true,
+      ts,
+    );
+  }
+  return libMapPromise;
+}
+
+export function useErrorChecker(scenario: ErrorScenario) {
+  const userCode = ref(scenario.brokenCode);
+  // Start with the pre-computed diagnostics so the editor shows squiggles immediately
+  const liveDiagnostics = ref<TsDiagnostic[]>([...scenario.diagnostics]);
+  const checking = ref(false);
+  const passed = ref<boolean | null>(null);
+  const revealed = ref(false);
+
+  // Reset state when the scenario changes
+  watch(
+    () => scenario.id,
+    () => {
+      userCode.value = scenario.brokenCode;
+      liveDiagnostics.value = [...scenario.diagnostics];
+      passed.value = null;
+      revealed.value = false;
+    },
+  );
+
+  async function checkFix(): Promise<void> {
+    checking.value = true;
+    passed.value = null;
+
+    try {
+      const libMap = await getLibMap();
+      const projectMap = new Map(libMap);
+      projectMap.set("input.ts", userCode.value);
+
+      const system = tsvfs.createSystem(projectMap);
+      const { compilerHost } = tsvfs.createVirtualCompilerHost(
+        system,
+        { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020 },
+        ts,
+      );
+
+      const program = ts.createProgram(
+        ["input.ts"],
+        { strict: true, noEmit: true, target: ts.ScriptTarget.ES2020 },
+        compilerHost,
+      );
+
+      const semanticDiags = program.getSemanticDiagnostics();
+      const results: TsDiagnostic[] = semanticDiags
+        .filter((d) => d.file?.fileName === "input.ts")
+        .map((d) => ({
+          code: d.code,
+          message: ts.flattenDiagnosticMessageText(d.messageText, "\n"),
+          line:
+            d.file && d.start !== undefined
+              ? d.file.getLineAndCharacterOfPosition(d.start).line + 1
+              : 0,
+        }));
+
+      liveDiagnostics.value = results;
+      passed.value = results.length === 0;
+    } catch (err) {
+      // Checker failure — surface as a diagnostic rather than crashing
+      liveDiagnostics.value = [
+        {
+          code: 0,
+          message: err instanceof Error ? err.message : String(err),
+          line: 0,
+        },
+      ];
+      passed.value = false;
+    } finally {
+      checking.value = false;
+    }
+  }
+
+  function reset(): void {
+    userCode.value = scenario.brokenCode;
+    liveDiagnostics.value = [...scenario.diagnostics];
+    passed.value = null;
+    revealed.value = false;
+  }
+
+  return {
+    userCode,
+    liveDiagnostics,
+    checking,
+    passed,
+    revealed,
+    checkFix,
+    reset,
+  };
+}
+```
+
+**How it works:**
+
+- `getLibMap()` fetches TypeScript standard lib `.d.ts` files from unpkg CDN the first time it is called, then caches the promise so subsequent calls are instant
+- `tsvfs.createVirtualCompilerHost` gives the TS compiler a fully in-memory filesystem — no Node.js `fs` needed
+- `program.getSemanticDiagnostics()` runs real type checking (same as `tsc`) including TS2322, TS2345, TS2339, TS7006, etc.
+- `liveDiagnostics` starts with `scenario.diagnostics` (instant, no network required) and is replaced with real results after the first `checkFix()` call
+
 ## Component: OutputConsole.vue
 
 ```vue
@@ -978,63 +1227,96 @@ const selected = computed<ErrorScenario>(
 
 ```vue
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { useErrorChecker } from "@/composables/useErrorChecker";
 import type { ErrorScenario } from "@/types/ts-explorer";
+import CodeEditor from "./CodeEditor.vue";
 
 const props = defineProps<{ scenario: ErrorScenario }>();
-const showFix = ref(false);
 
-watch(
-  () => props.scenario.id,
-  () => {
-    showFix.value = false;
-  },
-);
+const {
+  userCode,
+  liveDiagnostics,
+  checking,
+  passed,
+  revealed,
+  checkFix,
+  reset,
+} = useErrorChecker(props.scenario);
 </script>
 
 <template>
   <div class="error-workspace">
-    <!-- Broken code with CSS squiggly underlines on errored lines -->
-    <div class="broken-code-section">
-      <h3>Broken Code</h3>
-      <pre class="code-block"><code
-        v-for="(line, i) in scenario.brokenCode.split('\n')"
-        :key="i"
-        :class="[
-          'code-line',
-          scenario.diagnostics.some((d) => d.line === i + 1) && 'code-line--error',
-        ]"
-      >{{ line }}</code></pre>
+    <!-- Challenge prompt -->
+    <p class="error-prompt">{{ scenario.prompt }}</p>
+
+    <!-- Editable code editor — user types their fix here -->
+    <CodeEditor v-model="userCode" :disabled="checking" />
+
+    <!-- Action buttons -->
+    <div class="error-actions">
+      <button @click="checkFix" :disabled="checking" class="btn-check">
+        {{ checking ? "Checking…" : "▶ Check Fix" }}
+      </button>
+      <button @click="reset" :disabled="checking" class="btn-reset">
+        Reset
+      </button>
+      <button @click="revealed = !revealed" class="btn-reveal">
+        {{ revealed ? "Hide solution" : "Reveal" }}
+      </button>
     </div>
 
-    <!-- Diagnostic messages as the compiler would format them -->
+    <!-- Pass / fail badge — shown after first check -->
+    <div
+      v-if="passed !== null"
+      :class="[
+        'check-result',
+        passed ? 'check-result--pass' : 'check-result--fail',
+      ]"
+    >
+      <span v-if="passed">✓ All type errors fixed!</span>
+      <span v-else
+        >✗ {{ liveDiagnostics.length }} error{{
+          liveDiagnostics.length !== 1 ? "s" : ""
+        }}
+        remaining</span
+      >
+    </div>
+
+    <!-- Live diagnostics — initial pre-computed, replaced by real check results -->
     <div class="diagnostics-section">
       <h3>TypeScript Diagnostics</h3>
-      <ul class="diagnostic-list" role="list" aria-label="Compiler errors">
+      <p v-if="liveDiagnostics.length === 0" class="diagnostics-empty">
+        No type errors — looks good!
+      </p>
+      <ul
+        v-else
+        class="diagnostic-list"
+        role="list"
+        aria-label="Compiler errors"
+      >
         <li
-          v-for="diag in scenario.diagnostics"
-          :key="diag.code"
+          v-for="(diag, i) in liveDiagnostics"
+          :key="i"
           class="diagnostic-item"
         >
-          <span class="diagnostic-code">error TS{{ diag.code }}</span>
+          <span v-if="diag.code" class="diagnostic-code"
+            >error TS{{ diag.code }}</span
+          >
           <span class="diagnostic-message">{{ diag.message }}</span>
-          <span class="diagnostic-line">Line {{ diag.line }}</span>
+          <span v-if="diag.line" class="diagnostic-line"
+            >Line {{ diag.line }}</span
+          >
         </li>
       </ul>
     </div>
 
-    <!-- Fix guide, revealed on demand -->
-    <div class="fix-section">
-      <button @click="showFix = !showFix" class="btn-reveal">
-        {{ showFix ? "Hide fix" : "Show fix" }}
-      </button>
-      <template v-if="showFix">
-        <pre
-          class="code-block code-block--fixed"
-        ><code>{{ scenario.fixedCode }}</code></pre>
-        <div class="lesson-text">{{ scenario.lesson }}</div>
-      </template>
-    </div>
+    <!-- Solution revealed on demand -->
+    <template v-if="revealed">
+      <pre
+        class="code-block code-block--fixed"
+      ><code>{{ scenario.fixedCode }}</code></pre>
+      <div class="lesson-text">{{ scenario.lesson }}</div>
+    </template>
   </div>
 </template>
 ```
@@ -1043,13 +1325,25 @@ watch(
 
 ### Transpilation vs. Type Checking
 
-| Mechanism                                  | What it catches                         | Used in                   |
-| ------------------------------------------ | --------------------------------------- | ------------------------- |
-| `ts.transpileModule` + `reportDiagnostics` | Syntax errors, some invalid syntax      | `useTsRunner` runtime run |
-| Pre-computed `ErrorScenario.diagnostics`   | Full type errors (TS2322, TS2345, etc.) | TypeErrorPlayground       |
-| `new Function(transpiledJs)`               | Runtime errors after transpilation      | `useTsRunner` runtime run |
+| Mechanism                                  | What it catches                         | Used in                              |
+| ------------------------------------------ | --------------------------------------- | ------------------------------------ |
+| `ts.transpileModule` + `reportDiagnostics` | Syntax errors, some invalid syntax      | `useTsRunner` runtime run            |
+| `ErrorScenario.diagnostics` (pre-computed) | Full type errors — shown before editing | ErrorWorkspace initial render        |
+| `@typescript/vfs` + `ts.createProgram`     | Full semantic type errors (real `tsc`)  | `useErrorChecker` on Check Fix click |
+| `new Function(transpiledJs)`               | Runtime errors after transpilation      | `useTsRunner` runtime run            |
 
-Full type checking requires a program with a host and all referenced files — impractical in a lightweight browser sandbox. The Concept Problems focus on runtime behaviour of correct-ish TypeScript; the TypeErrorPlayground teaches type errors through curated, pre-annotated examples.
+`@typescript/vfs` creates a fully in-memory TypeScript environment in the browser. `createDefaultMapFromCDN` fetches the TS standard lib `.d.ts` files from CDN on first use (~1–2 s), then caches them for all subsequent checks.
+
+### Error Playground Flow
+
+1. User selects a scenario from `ErrorScenarioList` — `brokenCode` pre-fills the editor, `scenario.diagnostics` show immediately (no network wait)
+2. User edits the broken code directly in the `CodeEditor`
+3. User clicks **▶ Check Fix** → `useErrorChecker.checkFix()` runs a real `ts.createProgram` type check via `@typescript/vfs`
+4. `liveDiagnostics` is replaced with the real results; pass/fail badge appears
+   - Zero errors → green `✓ All type errors fixed!` badge
+   - Remaining errors → red badge + updated diagnostic list with real line numbers
+5. User can click **Reveal** at any time to see `fixedCode` and `lesson` without affecting check state
+6. **Reset** restores `brokenCode` and the original `scenario.diagnostics`
 
 ### CSS Squiggly Underlines
 
@@ -1084,12 +1378,14 @@ Apply a red wavy underline to `.code-line--error` lines using pure CSS (no JS DO
 3. Write `starterCode` that compiles and runs but demonstrates the TS concept gap
 4. `expectedOutput` must match what `console.log` produces after transpilation
 5. Write `explanation` in three parts: _what_ TypeScript does, _why_, and _how to fix or leverage it_
+6. `solutionCode` must be a **complete, self-contained runnable program** — include all type declarations, interface definitions, helper functions, variable declarations, and `console.log` calls needed to produce `expectedOutput`. Never write partial type-only snippets.
 
 ### Adding a New Error Scenario
 
 1. Add an `ErrorScenario` entry to `src/data/ts-error-scenarios.ts`
 2. Set `errorCode` to the primary TS diagnostic code (e.g. `2322`)
-3. Write `brokenCode` with exactly the error you want to teach — keep it minimal
-4. Set `diagnostics[].line` to the 1-based line number of the squiggly
-5. Copy the `message` verbatim from a real `tsc` run so it matches the real compiler output
-6. Write `lesson` starting with: what the compiler rule is, then how to think about it, then the fix
+3. Write a concise `prompt` — one sentence telling the user what to fix (e.g. `"Fix the type error: ..."`)
+4. Write `brokenCode` with exactly the error you want to teach — keep it minimal, max ~10 lines
+5. Set `diagnostics[].line` to the 1-based line number; copy `message` verbatim from a real `tsc --strict` run
+6. Write `fixedCode` as the minimal correct version of `brokenCode` (same structure, removes only the error)
+7. Write `lesson` in three parts: the compiler rule, the mental model for why it fires, and the fix pattern
